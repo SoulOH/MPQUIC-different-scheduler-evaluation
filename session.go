@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -58,11 +60,12 @@ type session struct {
 	version      protocol.VersionNumber
 	config       *Config
 
-	paths        map[protocol.PathID]*path
-	closedPaths  map[protocol.PathID]bool
-	pathsLock    sync.RWMutex
+	paths       map[protocol.PathID]*path
+	closedPaths map[protocol.PathID]bool
+	pathsLock   sync.RWMutex
 
 	createPaths bool
+	schedulerAlgorithm string
 
 	streamsMap *streamsMap
 
@@ -71,7 +74,7 @@ type session struct {
 	remoteRTTs         map[protocol.PathID]time.Duration
 	lastPathsFrameSent time.Time
 
-	streamFramer          *streamFramer
+	streamFramer *streamFramer
 
 	flowControlManager flowcontrol.FlowControlManager
 
@@ -113,7 +116,7 @@ type session struct {
 	sessionCreationTime     time.Time
 	lastNetworkActivityTime time.Time
 
-	timer           *utils.Timer
+	timer *utils.Timer
 	// keepAlivePingSent stores whether a Ping frame was sent to the peer or not
 	// it is reset as soon as we receive a packet from the peer
 	keepAlivePingSent bool
@@ -123,7 +126,11 @@ type session struct {
 	pathManager         *pathManager
 	pathManagerLaunched bool
 
-	scheduler           *scheduler
+	scheduler *scheduler
+
+	logLatFile *os.File
+	// allSntPackets counts the total sent Packets
+	allSntPackets uint64
 }
 
 var _ Session = &session{}
@@ -133,6 +140,7 @@ func newSession(
 	conn connection,
 	pconnMgr *pconnManager,
 	createPaths bool,
+	schedulerAlgorithm string,
 	v protocol.VersionNumber,
 	connectionID protocol.ConnectionID,
 	sCfg *handshake.ServerConfig,
@@ -140,14 +148,15 @@ func newSession(
 	config *Config,
 ) (packetHandler, <-chan handshakeEvent, error) {
 	s := &session{
-		paths:        make(map[protocol.PathID]*path),
-		closedPaths:  make(map[protocol.PathID]bool),
-		createPaths:  createPaths,
-		remoteRTTs:   make(map[protocol.PathID]time.Duration),
-		connectionID: connectionID,
-		perspective:  protocol.PerspectiveServer,
-		version:      v,
-		config:       config,
+		paths:              make(map[protocol.PathID]*path),
+		closedPaths:        make(map[protocol.PathID]bool),
+		createPaths:        createPaths,
+		schedulerAlgorithm: schedulerAlgorithm,
+		remoteRTTs:         make(map[protocol.PathID]time.Duration),
+		connectionID:       connectionID,
+		perspective:        protocol.PerspectiveServer,
+		version:            v,
+		config:             config,
 	}
 	return s.setup(sCfg, "", tlsConf, nil, conn, pconnMgr)
 }
@@ -157,6 +166,7 @@ var newClientSession = func(
 	conn connection,
 	pconnMgr *pconnManager,
 	createPaths bool,
+	schedulerAlgorithm string,
 	hostname string,
 	v protocol.VersionNumber,
 	connectionID protocol.ConnectionID,
@@ -168,6 +178,7 @@ var newClientSession = func(
 		paths:        make(map[protocol.PathID]*path),
 		closedPaths:  make(map[protocol.PathID]bool),
 		createPaths:  createPaths,
+		schedulerAlgorithm: schedulerAlgorithm,
 		remoteRTTs:   make(map[protocol.PathID]time.Duration),
 		connectionID: connectionID,
 		perspective:  protocol.PerspectiveClient,
@@ -209,7 +220,8 @@ func (s *session) setup(
 		s.config.IdleTimeout,
 	)
 
-	s.scheduler = &scheduler{}
+	s.scheduler = &scheduler{pathsRef: &s.paths}
+	SetSchedulerAlgorithm(s.schedulerAlgorithm)
 	s.scheduler.setup()
 
 	if pconnMgr == nil && conn != nil {
@@ -316,6 +328,12 @@ func (s *session) run() error {
 	aeadChanged := s.aeadChanged
 
 	var timerPth *path
+
+	logStop := make(chan struct{})
+	if LogPayload {
+		logTicker := time.NewTicker(1000 * time.Millisecond)
+		go s.scheduler.LogSendings(s, logTicker, logStop)
+	}
 
 runLoop:
 	for {
@@ -424,12 +442,15 @@ runLoop:
 		}
 
 		// Check if we should send a PATHS frame (currently hardcoded at 200 ms) only when at least one stream is open (not counting streams 1 and 3 never closed...)
-		if s.handshakeComplete && s.version >= protocol.VersionMP && now.Sub(s.lastPathsFrameSent) >= 200 * time.Millisecond && len(s.streamsMap.openStreams) > 2 {
+		if s.handshakeComplete && s.version >= protocol.VersionMP && now.Sub(s.lastPathsFrameSent) >= 200*time.Millisecond && len(s.streamsMap.openStreams) > 2 {
 			s.schedulePathsFrame()
 		}
 
 		s.garbageCollectStreams()
 	}
+
+	// Stop logging
+	logStop <- struct{}{}
 
 	// only send the error the handshakeChan when the handshake is not completed yet
 	// otherwise this chan will already be closed
@@ -487,7 +508,7 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 	s.keepAlivePingSent = false
 
 	var pth *path
-	var ok  bool
+	var ok bool
 	var err error
 
 	pth, ok = s.paths[p.publicHeader.PathID]
@@ -501,13 +522,26 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 	return pth.handlePacketImpl(p)
 }
 
-func (s *session) handleFrames(fs []wire.Frame, p *path) error {
+func (s *session) handleFrames(fs []wire.Frame, p *path, rcvTime time.Time) error {
 	for _, ff := range fs {
 		var err error
 		wire.LogFrame(ff, false)
 		switch frame := ff.(type) {
 		case *wire.StreamFrame:
 			err = s.handleStreamFrame(frame)
+
+			// Log receive timestamps on client side for frame latencies
+			if s.perspective == protocol.PerspectiveClient {
+				if s.logLatFile == nil {
+					filename := "Lat_recv_F.log"
+					s.logLatFile, _ = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				}
+
+				logLine := strconv.FormatUint(uint64(frame.StreamID), 10) + ";" +
+					strconv.FormatUint(uint64(frame.Offset), 10) + ";" +
+					strconv.FormatInt(rcvTime.UnixNano(), 10) + "\n"
+				s.logLatFile.WriteString(logLine)
+			}
 		case *wire.AckFrame:
 			err = s.handleAckFrame(frame)
 		case *wire.ConnectionCloseFrame:
@@ -537,7 +571,7 @@ func (s *session) handleFrames(fs []wire.Frame, p *path) error {
 			s.pathsLock.RLock()
 			for i := 0; i < int(frame.NumPaths); i++ {
 				s.remoteRTTs[frame.PathIDs[i]] = frame.RemoteRTTs[i]
-				if frame.RemoteRTTs[i] >= 30 * time.Minute {
+				if frame.RemoteRTTs[i] >= 30*time.Minute {
 					// Path is potentially failed
 					s.paths[frame.PathIDs[i]].potentiallyFailed.Set(true)
 				}
@@ -593,9 +627,13 @@ func (s *session) handleStreamFrame(frame *wire.StreamFrame) error {
 		s.pathsLock.RLock()
 		utils.Infof("Info for stream %x of %x", frame.StreamID, s.connectionID)
 		for pathID, pth := range s.paths {
-			sntPkts, sntRetrans, sntLost := pth.sentPacketHandler.GetStatistics()
-			rcvPkts := pth.receivedPacketHandler.GetStatistics()
-			utils.Infof("Path %x: sent %d retrans %d lost %d; rcv %d", pathID, sntPkts, sntRetrans, sntLost, rcvPkts)
+			if pathID == protocol.InitialPathID && len(s.paths) > 1 {
+				continue
+			}
+			sntPkts, sntRetrans, sntLost, sntBytes := pth.sentPacketHandler.GetStatistics()
+			rcvPkts, rcvBytes := pth.receivedPacketHandler.GetStatistics()
+			utils.Infof("Path %x (%v - %v): sent %d (%d B) retrans %d lost %d; rcv %d (%d B) rtt %v\n",
+				pathID, pth.conn.LocalAddr(), pth.conn.RemoteAddr(), sntPkts, sntBytes, sntRetrans, sntLost, rcvPkts, rcvBytes, pth.rttStats.SmoothedRTT())
 		}
 		s.pathsLock.RUnlock()
 	}
@@ -698,7 +736,7 @@ func (s *session) closePaths() {
 		s.pathsLock.RLock()
 		for _, pth := range s.paths {
 			select {
-			case pth.closeChan<-nil:
+			case pth.closeChan <- nil:
 			default:
 				// Don't block
 			}
@@ -786,7 +824,7 @@ func (s *session) sendPackedPacket(packet *packedPacket, pth *path) error {
 	if err != nil {
 		return err
 	}
-	pth.sentPacket<-struct{}{}
+	pth.sentPacket <- struct{}{}
 
 	s.logPacket(packet, pth.pathID)
 	return pth.conn.Write(packet.raw)
@@ -818,13 +856,29 @@ func (s *session) sendPing(pth *path) error {
 }
 
 func (s *session) logPacket(packet *packedPacket, pathID protocol.PathID) {
-	if !utils.Debug() {
-		// We don't need to allocate the slices for calling the format functions
-		return
+
+	// Log send timestamps on server side for frame latencies
+	sendTime := time.Now().UnixNano()
+	if s.perspective == protocol.PerspectiveServer {
+		if s.logLatFile == nil {
+			filename := "Lat_send_F.log"
+			s.logLatFile, _ = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		}
 	}
+	s.allSntPackets++
+
 	utils.Debugf("-> Sending packet 0x%x (%d bytes) for connection %x on path %x, %s", packet.number, len(packet.raw), s.connectionID, pathID, packet.encryptionLevel)
 	for _, frame := range packet.frames {
 		wire.LogFrame(frame, true)
+
+		if s.perspective == protocol.PerspectiveServer {
+			if _, isType := frame.(*wire.StreamFrame); isType {
+				logLine := strconv.FormatUint(uint64(frame.(*wire.StreamFrame).StreamID), 10) + ";" +
+					strconv.FormatUint(uint64(frame.(*wire.StreamFrame).Offset), 10) + ";" +
+					strconv.FormatInt(sendTime, 10) + "\n"
+				s.logLatFile.WriteString(logLine)
+			}
+		}
 	}
 }
 
@@ -833,6 +887,7 @@ func (s *session) logPacket(packet *packedPacket, pathID protocol.PathID) {
 func (s *session) GetOrOpenStream(id protocol.StreamID) (Stream, error) {
 	str, err := s.streamsMap.GetOrOpenStream(id)
 	if str != nil {
+		// the server potentionally starts using the QUIC stream for IO streaming
 		return str, err
 	}
 	// make sure to return an actual nil value here, not an Stream with value nil
@@ -872,7 +927,7 @@ func (s *session) newStream(id protocol.StreamID) *stream {
 	} else {
 		s.flowControlManager.NewStream(id, true)
 	}
-	return newStream(id, s.scheduleSending, s.queueResetStreamFrame, s.flowControlManager)
+	return newStream(id, s.scheduleSending, s.queueResetStreamFrame, s.flowControlManager, s.perspective)
 }
 
 // garbageCollectStreams goes through all streams and removes EOF'ed streams
