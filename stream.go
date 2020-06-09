@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -57,6 +59,10 @@ type stream struct {
 	writeDeadline  time.Time
 
 	flowControlManager flowcontrol.FlowControlManager
+
+	// For logging the buffer durations
+	perspective   protocol.Perspective
+	logBufferFile *os.File
 }
 
 var _ Stream = &stream{}
@@ -73,7 +79,8 @@ var errDeadline net.Error = &deadlineError{}
 func newStream(StreamID protocol.StreamID,
 	onData func(),
 	onReset func(protocol.StreamID, protocol.ByteCount),
-	flowControlManager flowcontrol.FlowControlManager) *stream {
+	flowControlManager flowcontrol.FlowControlManager,
+	perspective protocol.Perspective) *stream {
 	s := &stream{
 		onData:             onData,
 		onReset:            onReset,
@@ -82,6 +89,7 @@ func newStream(StreamID protocol.StreamID,
 		frameQueue:         newStreamFrameSorter(),
 		readChan:           make(chan struct{}, 1),
 		writeChan:          make(chan struct{}, 1),
+		perspective:        perspective,
 	}
 	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
 	return s
@@ -97,6 +105,14 @@ func (s *stream) Read(p []byte) (int, error) {
 	}
 	if s.finishedReading.Get() {
 		return 0, io.EOF
+	}
+
+	// Log read timestamps on client side for frame buffering
+	if s.perspective == protocol.PerspectiveClient {
+		if s.logBufferFile == nil {
+			filename := "Lat_read_F.log"
+			s.logBufferFile, _ = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		}
 	}
 
 	bytesRead := 0
@@ -141,6 +157,15 @@ func (s *stream) Read(p []byte) (int, error) {
 			frame = s.frameQueue.Head()
 		}
 		s.mutex.Unlock()
+
+		// Log that frame was read
+		if frame != nil {
+			readTime := time.Now().UnixNano()
+			logLine := strconv.FormatUint(uint64(frame.StreamID), 10) + ";" +
+				strconv.FormatUint(uint64(frame.Offset), 10) + ";" +
+				strconv.FormatInt(readTime, 10) + "\n"
+			s.logBufferFile.WriteString(logLine)
+		}
 
 		if err != nil {
 			return bytesRead, err
