@@ -1,6 +1,6 @@
 module github.com/lucas-clemente/quic-go
 
-go 1.12
+go 1.13
 
 require (
 	github.com/bifurcation/mint v0.0.0-20200214151656-93c820e81448
@@ -12,8 +12,6 @@ require (
 	github.com/lucas-clemente/quic-go-certificates v0.0.0-20160823095156-d2f86524cced
 	github.com/onsi/ginkgo v1.12.3
 	github.com/onsi/gomega v1.10.1
-	golang.org/x/crypto v0.0.0-20200510223506-06a226fb4e37
-	golang.org/x/net v0.0.0-20200528225125-3c3fba18258b
-	golang.org/x/sys v0.0.0-20200602100848-8d3cce7afc34 // indirect
-	golang.org/x/tools v0.0.0-20200601175630-2caf76543d99
+	golang.org/x/crypto v0.0.0-20200604202706-70a84ac30bf9
+	golang.org/x/net v0.0.0-20200602114024-627f9648deb9
 )

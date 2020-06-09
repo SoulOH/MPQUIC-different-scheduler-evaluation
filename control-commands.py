@@ -7,13 +7,13 @@ def main():
     scheduler = sys.argv[1]
     if scheduler not in ["RR", "lowRTT", "utilRepair", "oppReduntant"]:
         return
-    directory = "/home/souloh/testdata-x-50ms-50ms-5-loss-5-loss/"
+    directory = "/home/souloh/testdata-50ms-50ms-0-loss-0-loss/"
     os.system("mkdir " + directory)
-    smallFileData = directory + scheduler + "-small-file-test-data.log"
-    largeFileData = directory + scheduler + "-large-file-test-data.log"
+    smallFileData = directory + "all-" + scheduler + "-small-file-test-data.log"
+    largeFileData = directory + "all-" + scheduler + "-large-file-test-data.log"
 
     with open(smallFileData, "a") as f:
-        for i in range(0, 35):
+        for i in range(0, 100):
             print("small file times " + str(i+1))
             smallFileName = directory + scheduler + "-smallFile-" + str(i) +".log"
             command1 = "go run example/client/main.go -m -o " \
@@ -24,7 +24,7 @@ def main():
             f.write(smallFileCompletionTime)
     
     with open(largeFileData, "a") as f:
-        for i in range(0, 35):
+        for i in range(0, 100):
             print("large file times " + str(i+1))
             largeFileName = directory + scheduler + "-largeFile-" + str(i) +".log"
             command2 = "go run example/client/main.go -m -o " \
