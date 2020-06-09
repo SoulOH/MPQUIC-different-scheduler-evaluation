@@ -43,7 +43,7 @@ type server struct {
 	sessionQueue chan Session
 	errorChan    chan struct{}
 
-	newSession func(conn connection, pconnMgr *pconnManager, createPaths bool, v protocol.VersionNumber, connectionID protocol.ConnectionID, sCfg *handshake.ServerConfig, tlsConf *tls.Config, config *Config) (packetHandler, <-chan handshakeEvent, error)
+	newSession func(conn connection, pconnMgr *pconnManager, createPaths bool, schedulerAlgorithm string, v protocol.VersionNumber, connectionID protocol.ConnectionID, sCfg *handshake.ServerConfig, tlsConf *tls.Config, config *Config) (packetHandler, <-chan handshakeEvent, error)
 }
 
 var _ Listener = &server{}
@@ -166,7 +166,8 @@ var defaultAcceptCookie = func(clientAddr net.Addr, cookie *Cookie) bool {
 func populateServerConfig(config *Config) *Config {
 	if config == nil {
 		config = &Config{
-			CreatePaths: true, // Grant this ability by default for a server
+			CreatePaths: true,
+			SchedulerAlgorithm: "RR", // Grant this ability by default for a server
 		}
 	}
 	versions := config.Versions
@@ -205,6 +206,8 @@ func populateServerConfig(config *Config) *Config {
 		KeepAlive:                             config.KeepAlive,
 		MaxReceiveStreamFlowControlWindow:     maxReceiveStreamFlowControlWindow,
 		MaxReceiveConnectionFlowControlWindow: maxReceiveConnectionFlowControlWindow,
+		CreatePaths:                           config.CreatePaths,
+		SchedulerAlgorithm:                    config.SchedulerAlgorithm,
 	}
 }
 
@@ -358,6 +361,7 @@ func (s *server) handlePacket(rcvRawPacket *receivedRawPacket) error {
 			conn,
 			s.pconnMgr,
 			s.config.CreatePaths,
+			s.config.SchedulerAlgorithm,
 			version,
 			hdr.ConnectionID,
 			s.scfg,

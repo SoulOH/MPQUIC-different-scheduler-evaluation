@@ -123,6 +123,8 @@ type Config struct {
 	CacheHandshake bool
 	// Should the host try to create new paths, if possible?
 	CreatePaths bool
+	// Select path scheduler algorithm
+	SchedulerAlgorithm string
 }
 
 // A Listener for incoming QUIC connections

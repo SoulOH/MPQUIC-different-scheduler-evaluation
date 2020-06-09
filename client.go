@@ -196,9 +196,10 @@ func populateClientConfig(config *Config) *Config {
 		RequestConnectionIDTruncation:         config.RequestConnectionIDTruncation,
 		MaxReceiveStreamFlowControlWindow:     maxReceiveStreamFlowControlWindow,
 		MaxReceiveConnectionFlowControlWindow: maxReceiveConnectionFlowControlWindow,
-		KeepAlive:      config.KeepAlive,
-		CacheHandshake: config.CacheHandshake,
-		CreatePaths:    config.CreatePaths,
+		KeepAlive:                             config.KeepAlive,
+		CacheHandshake:                        config.CacheHandshake,
+		CreatePaths:                           config.CreatePaths,
+		SchedulerAlgorithm:                    config.SchedulerAlgorithm,
 	}
 }
 
@@ -395,6 +396,7 @@ func (c *client) createNewSession(negotiatedVersions []protocol.VersionNumber, c
 		conn,
 		c.pconnMgr,
 		c.config.CreatePaths,
+		c.config.SchedulerAlgorithm,
 		c.hostname,
 		c.version,
 		c.connectionID,
