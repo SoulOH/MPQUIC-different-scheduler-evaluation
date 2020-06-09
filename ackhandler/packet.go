@@ -56,3 +56,83 @@ func (p *Packet) IsRetransmittable() bool {
 	}
 	return false
 }
+
+// GetStreamFrameLength returns the length of contained Stream frames payload
+func (p *Packet) GetStreamFrameLength() uint64 {
+
+	var sfPayloadLength uint64
+
+	for _, f := range p.Frames {
+		switch f.(type) {
+		case *wire.StreamFrame:
+			// DataLen() gives the payload length of the stream frame without header
+			sfPayloadLength += uint64(f.(*wire.StreamFrame).DataLen())
+		}
+	}
+
+	return sfPayloadLength
+}
+
+// GetCopyFrames returns a slice with all contained frames that can be duplicated
+func (p *Packet) GetCopyFrames() []wire.Frame {
+
+	copyFrames := make([]wire.Frame, 0)
+
+	for _, f := range p.Frames {
+		// Frames suitable for MP-duplication
+		switch f.(type) {
+		case *wire.StreamFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.RstStreamFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.WindowUpdateFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.BlockedFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.PingFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.AddAddressFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.PathsFrame:
+			copyFrames = append(copyFrames, f)
+		case *wire.GoawayFrame:
+			copyFrames = append(copyFrames, f)
+		}
+	}
+
+	if len(copyFrames) == 0 {
+		return nil
+	}
+	return copyFrames
+}
+
+// IsDupDroppable returns if the Packet can be dropped from a path's history,
+// after it was ACKed on another path.
+func (p *Packet) IsDupDroppable() bool {
+
+	for _, f := range p.Frames {
+		// Frames which can be dropped, when there duplicate has already been received
+		switch f.(type) {
+		case *wire.StreamFrame:
+			continue
+		case *wire.RstStreamFrame:
+			continue
+		case *wire.WindowUpdateFrame:
+			continue
+		case *wire.BlockedFrame:
+			continue
+		case *wire.PingFrame:
+			continue
+		case *wire.AddAddressFrame:
+			continue
+		case *wire.PathsFrame:
+			continue
+		case *wire.GoawayFrame:
+			continue
+		default:
+			return false
+		}
+	}
+
+	return true
+}

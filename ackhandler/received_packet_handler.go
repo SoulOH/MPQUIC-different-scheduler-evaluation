@@ -27,7 +27,8 @@ type receivedPacketHandler struct {
 
 	version protocol.VersionNumber
 
-	packets uint64
+	packets              uint64
+	recvStreamFrameBytes uint64
 }
 
 // NewReceivedPacketHandler creates a new receivedPacketHandler
@@ -39,17 +40,18 @@ func NewReceivedPacketHandler(version protocol.VersionNumber) ReceivedPacketHand
 	}
 }
 
-func (h *receivedPacketHandler) GetStatistics() uint64 {
-	return h.packets
+func (h *receivedPacketHandler) GetStatistics() (uint64, uint64) {
+	return h.packets, h.recvStreamFrameBytes
 }
 
-func (h *receivedPacketHandler) ReceivedPacket(packetNumber protocol.PacketNumber, shouldInstigateAck bool) error {
+func (h *receivedPacketHandler) ReceivedPacket(packetNumber protocol.PacketNumber, shouldInstigateAck bool, payloadLength uint64) error {
 	if packetNumber == 0 {
 		return errInvalidPacketNumber
 	}
 
 	// A new packet was received on that path and passes checks, so count it for stats
 	h.packets++
+	h.recvStreamFrameBytes += payloadLength
 
 	if packetNumber > h.largestObserved {
 		h.largestObserved = packetNumber

@@ -18,6 +18,8 @@ type SentPacketHandler interface {
 	SetInflightAsLost()
 
 	SendingAllowed() bool
+	CongestionFree() bool
+	OvershootFree() bool
 	GetStopWaitingFrame(force bool) *wire.StopWaitingFrame
 	ShouldSendRetransmittablePacket() bool
 	DequeuePacketForRetransmission() (packet *Packet)
@@ -28,12 +30,15 @@ type SentPacketHandler interface {
 
 	DuplicatePacket(packet *Packet)
 
-	GetStatistics() (uint64, uint64, uint64)
+	GetStatistics() (uint64, uint64, uint64, uint64)
+	GetCongestionWindow() uint64
+	GetBytesInFlight() uint64
+	RemovePacketByNumber(protocol.PacketNumber) bool
 }
 
 // ReceivedPacketHandler handles ACKs needed to send for incoming packets
 type ReceivedPacketHandler interface {
-	ReceivedPacket(packetNumber protocol.PacketNumber, shouldInstigateAck bool) error
+	ReceivedPacket(packetNumber protocol.PacketNumber, shouldInstigateAck bool, packetLength uint64) error
 	SetLowerLimit(protocol.PacketNumber)
 
 	GetAlarmTimeout() time.Time
@@ -41,5 +46,5 @@ type ReceivedPacketHandler interface {
 
 	GetClosePathFrame() *wire.ClosePathFrame
 
-	GetStatistics() uint64
+	GetStatistics() (uint64, uint64)
 }

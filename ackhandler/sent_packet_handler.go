@@ -31,6 +31,9 @@ const (
 	minRetransmissionTime = 200 * time.Millisecond
 	// Minimum tail loss probe time in ms
 	minTailLossProbeTimeout = 10 * time.Millisecond
+
+	// Bufferbloat mitigation parameter lambda
+	bmLambda = 1.5
 )
 
 var (
@@ -82,13 +85,27 @@ type sentPacketHandler struct {
 	// The alarm timeout
 	alarm time.Time
 
-	packets         uint64
-	retransmissions uint64
-	losses          uint64
+	pathID        protocol.PathID
+	onAckCallback func(protocol.PathID, protocol.PacketNumber)
+
+	packets              uint64
+	retransmissions      uint64
+	losses               uint64
+	sentStreamFrameBytes uint64
+}
+
+func (h *sentPacketHandler) GetCongestionWindow() uint64 {
+	return uint64(h.congestion.GetCongestionWindow())
+}
+
+func (h *sentPacketHandler) GetBytesInFlight() uint64 {
+	return uint64(h.bytesInFlight)
 }
 
 // NewSentPacketHandler creates a new sentPacketHandler
-func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlgorithm, onRTOCallback func(time.Time) bool) SentPacketHandler {
+func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlgorithm, onRTOCallback func(time.Time) bool,
+	pathID protocol.PathID, onAckCallback func(protocol.PathID, protocol.PacketNumber)) SentPacketHandler {
+
 	var congestionControl congestion.SendAlgorithm
 
 	if cong != nil {
@@ -109,11 +126,13 @@ func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlg
 		rttStats:           rttStats,
 		congestion:         congestionControl,
 		onRTOCallback:      onRTOCallback,
+		pathID:             pathID,
+		onAckCallback:      onAckCallback,
 	}
 }
 
-func (h *sentPacketHandler) GetStatistics() (uint64, uint64, uint64) {
-	return h.packets, h.retransmissions, h.losses
+func (h *sentPacketHandler) GetStatistics() (uint64, uint64, uint64, uint64) {
+	return h.packets, h.retransmissions, h.losses, h.sentStreamFrameBytes
 }
 
 func (h *sentPacketHandler) largestInOrderAcked() protocol.PacketNumber {
@@ -149,6 +168,7 @@ func (h *sentPacketHandler) SentPacket(packet *Packet) error {
 
 	// Update some statistics
 	h.packets++
+	h.sentStreamFrameBytes += packet.GetStreamFrameLength()
 
 	// XXX RTO and TLP are recomputed based on the possible last sent retransmission. Is it ok like this?
 	h.lastSentTime = now
@@ -211,6 +231,7 @@ func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumbe
 
 	if len(ackedPackets) > 0 {
 		for _, p := range ackedPackets {
+			h.onAckCallback(h.pathID, p.Value.PacketNumber)
 			h.onPacketAcked(p)
 			h.congestion.OnPacketAcked(p.Value.PacketNumber, p.Value.Length, h.bytesInFlight)
 		}
@@ -251,6 +272,7 @@ func (h *sentPacketHandler) ReceivedClosePath(f *wire.ClosePathFrame, withPacket
 
 	if len(ackedPackets) > 0 {
 		for _, p := range ackedPackets {
+			h.onAckCallback(h.pathID, p.Value.PacketNumber)
 			h.onPacketAcked(p)
 			h.congestion.OnPacketAcked(p.Value.PacketNumber, p.Value.Length, h.bytesInFlight)
 		}
@@ -522,6 +544,23 @@ func (h *sentPacketHandler) SendingAllowed() bool {
 	return !maxTrackedLimited && (!congestionLimited || haveRetransmissions)
 }
 
+func (h *sentPacketHandler) CongestionFree() bool {
+
+	congestionLimited := h.bytesInFlight > h.congestion.GetCongestionWindow()
+	maxTrackedLimited := protocol.PacketNumber(len(h.retransmissionQueue)+h.packetHistory.Len()) >= protocol.MaxTrackedSentPackets
+	return !congestionLimited && !maxTrackedLimited
+}
+
+func (h *sentPacketHandler) OvershootFree() bool {
+
+	// Bufferbloat mitigation algorithm
+	congestionWindow := h.congestion.GetCongestionWindow()
+	minRTT := h.rttStats.MinRTT().Seconds()
+	sRTT := h.rttStats.SmoothedRTT().Seconds()
+	overshootLimit := protocol.ByteCount(bmLambda * (minRTT / sRTT) * float64(congestionWindow))
+	return h.bytesInFlight < overshootLimit
+}
+
 func (h *sentPacketHandler) retransmitTLP() {
 	if p := h.packetHistory.Back(); p != nil {
 		h.queuePacketForRetransmission(p)
@@ -621,4 +660,23 @@ func (h *sentPacketHandler) garbageCollectSkippedPackets() {
 		}
 	}
 	h.skippedPackets = h.skippedPackets[deleteIndex:]
+}
+
+func (h *sentPacketHandler) RemovePacketByNumber(num protocol.PacketNumber) bool {
+
+	removedBytes := h.packetHistory.RemovePacketByNumber(uint64(num))
+	h.bytesInFlight -= protocol.ByteCount(removedBytes)
+	if removedBytes > 0 {
+		h.rtoCount = 0
+		h.tlpCount = 0
+		return true
+	}
+	// Maybe also remove from retransmissionQueue
+	for i, pkt := range h.retransmissionQueue {
+		if pkt.PacketNumber == num {
+			h.retransmissionQueue = append(h.retransmissionQueue[:i], h.retransmissionQueue[i+1:]...)
+			return true
+		}
+	}
+	return false
 }

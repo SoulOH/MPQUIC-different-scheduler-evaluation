@@ -212,3 +212,20 @@ func (l *PacketList) PushFrontList(other *PacketList) {
 		l.insertValue(e.Value, &l.root)
 	}
 }
+
+// RemovePacketByNumber searches for a packet with given packet number and removes it on find.
+// Returns number of bytes, of the removed packet.
+// If return value is zero, packet was not found in list.
+func (l *PacketList) RemovePacketByNumber(num uint64) uint64 {
+	
+	for el := l.Front(); el != nil; el = el.Next() {
+		packet := el.Value
+		packetNumber := uint64(packet.PacketNumber)
+		if packetNumber == num {
+			l.remove(el)
+			return uint64(packet.Length)
+		}
+	}
+
+	return 0
+}
