@@ -97,6 +97,26 @@ func init() {
 				<input type="submit">
 			</form></body></html>`)
 	})
+
+	http.HandleFunc("/demo/large-file", func(w http.ResponseWriter, request *http.Request) {
+
+		//设置响应的header头
+		w.Header().Add("Content-Type", "application/octet-stream")
+		w.Header().Add("Content-Disposition", "attachment; filename=\"large-file.zip\"")
+
+		//传回文件
+		http.ServeFile(w, request, "/var/demo/large-file.zip")
+	})
+
+	http.HandleFunc("/demo/small-file", func(w http.ResponseWriter, request *http.Request) {
+
+		//设置响应的header头
+		w.Header().Add("Content-Type", "application/octet-stream")
+		w.Header().Add("Content-Disposition", "attachment; filename=\"small-file.txt\"")
+
+		//传回文件
+		http.ServeFile(w, request, "/var/demo/small-file.txt")
+	})
 }
 
 func getBuildDir() string {
@@ -121,6 +141,7 @@ func main() {
 	certPath := flag.String("certpath", getBuildDir(), "certificate directory")
 	www := flag.String("www", "/var/www", "www data")
 	tcp := flag.Bool("tcp", false, "also listen on TCP")
+	scheduler := flag.String("s", "RR", "scheduler algorithm")
 	flag.Parse()
 
 	if *verbose {
@@ -148,7 +169,7 @@ func main() {
 			if *tcp {
 				err = h2quic.ListenAndServe(bCap, certFile, keyFile, nil)
 			} else {
-				err = h2quic.ListenAndServeQUIC(bCap, certFile, keyFile, nil)
+				err = h2quic.ListenAndServeQUIC(bCap, certFile, keyFile, nil, false, *scheduler)
 			}
 			if err != nil {
 				fmt.Println(err)
