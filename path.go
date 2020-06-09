@@ -5,10 +5,10 @@ import (
 
 	"github.com/lucas-clemente/quic-go/ackhandler"
 	"github.com/lucas-clemente/quic-go/congestion"
-	"github.com/lucas-clemente/quic-go/qerr"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/lucas-clemente/quic-go/qerr"
 )
 
 const (
@@ -33,7 +33,7 @@ type path struct {
 
 	potentiallyFailed utils.AtomicBool
 
-	sentPacket          chan struct{}
+	sentPacket chan struct{}
 
 	// It is now the responsibility of the path to keep its packet number
 	packetNumberGenerator *packetNumberGenerator
@@ -47,7 +47,7 @@ type path struct {
 
 	lastNetworkActivityTime time.Time
 
-	timer           *utils.Timer
+	timer *utils.Timer
 }
 
 // setup initializes values that are independent of the perspective
@@ -56,12 +56,13 @@ func (p *path) setup(oliaSenders map[protocol.PathID]*congestion.OliaSender) {
 
 	var cong congestion.SendAlgorithm
 
-	if p.sess.version >= protocol.VersionMP && oliaSenders != nil && p.pathID != protocol.InitialPathID {
+	if p.sess.version >= protocol.VersionMP && oliaSenders != nil && p.pathID != protocol.InitialPathID && CongestionControl != "cubic" {
 		cong = congestion.NewOliaSender(oliaSenders, p.rttStats, protocol.InitialCongestionWindow, protocol.DefaultMaxCongestionWindow)
 		oliaSenders[p.pathID] = cong.(*congestion.OliaSender)
 	}
 
-	sentPacketHandler := ackhandler.NewSentPacketHandler(p.rttStats, cong, p.onRTO)
+	// When cong is nil, Cubic is used as default
+	sentPacketHandler := ackhandler.NewSentPacketHandler(p.rttStats, cong, p.onRTO, p.pathID, p.sess.scheduler.crossAckHandling)
 
 	now := time.Now()
 
@@ -225,7 +226,9 @@ func (p *path) handlePacketImpl(pkt *receivedPacket) error {
 	p.largestRcvdPacketNumber = utils.MaxPacketNumber(p.largestRcvdPacketNumber, hdr.PacketNumber)
 
 	isRetransmittable := ackhandler.HasRetransmittableFrames(packet.frames)
-	if err = p.receivedPacketHandler.ReceivedPacket(hdr.PacketNumber, isRetransmittable); err != nil {
+	// Create temporary ackhandler.Packet object, to get the payload length of the Stream frames
+	packetStreamFrameLength := (&ackhandler.Packet{0, packet.frames, 0, 0, time.Time{}}).GetStreamFrameLength()
+	if err = p.receivedPacketHandler.ReceivedPacket(hdr.PacketNumber, isRetransmittable, packetStreamFrameLength); err != nil {
 		return err
 	}
 
@@ -233,7 +236,7 @@ func (p *path) handlePacketImpl(pkt *receivedPacket) error {
 		return err
 	}
 
-	return p.sess.handleFrames(packet.frames, p)
+	return p.sess.handleFrames(packet.frames, p, pkt.rcvTime)
 }
 
 func (p *path) onRTO(lastSentTime time.Time) bool {
