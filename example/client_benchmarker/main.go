@@ -20,6 +20,7 @@ import (
 func main() {
 	verbose := flag.Bool("v", false, "verbose")
 	multipath := flag.Bool("m", false, "multipath")
+	scheduler := flag.String("s", "RR", "scheduler algorithm")
 	output := flag.String("o", "", "logging output")
 	cache := flag.Bool("c", false, "cache handshake information")
 	flag.Parse()
@@ -42,6 +43,7 @@ func main() {
 
 	quicConfig := &quic.Config{
 		CreatePaths: *multipath,
+		SchedulerAlgorithm: *scheduler,
 		CacheHandshake: *cache,
 	}
 
