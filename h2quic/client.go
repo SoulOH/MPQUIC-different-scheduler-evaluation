@@ -55,6 +55,7 @@ var defaultQuicConfig = &quic.Config{
 	KeepAlive:                     true,
 	CacheHandshake:                false,
 	CreatePaths:                   false,
+	SchedulerAlgorithm:            "RR",
 }
 
 // newClient creates a new client
